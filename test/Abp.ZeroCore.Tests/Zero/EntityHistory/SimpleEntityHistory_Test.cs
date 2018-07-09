@@ -24,6 +24,7 @@ namespace Abp.Zero.EntityHistory
     {
         private readonly IRepository<Blog> _blogRepository;
         private readonly IRepository<Post, Guid> _postRepository;
+        private readonly IRepository<Comment> _commentRepository;
 
         private IEntityHistoryStore _entityHistoryStore;
 
@@ -31,6 +32,7 @@ namespace Abp.Zero.EntityHistory
         {
             _blogRepository = Resolve<IRepository<Blog>>();
             _postRepository = Resolve<IRepository<Post, Guid>>();
+            _commentRepository = Resolve<IRepository<Comment>>();
 
             Resolve<IEntityHistoryConfiguration>().IsEnabledForAnonymousUsers = true;
         }
@@ -49,7 +51,7 @@ namespace Abp.Zero.EntityHistory
         [Fact]
         public void Should_Write_History_For_Tracked_Entities_Create()
         {
-            /* Blog has HistoryTracked attribute. */
+            /* Blog has Audited attribute. */
 
             var blog2Id = CreateBlogAndGetId();
 
@@ -58,8 +60,8 @@ namespace Abp.Zero.EntityHistory
                      s.EntityChanges[0].ChangeTime == s.EntityChanges[0].EntityEntry.As<EntityEntry>().Entity.As<IHasCreationTime>().CreationTime &&
                      s.EntityChanges[0].ChangeType == EntityChangeType.Created &&
                      s.EntityChanges[0].EntityId == blog2Id.ToJsonString(false, false) &&
-                     s.EntityChanges[0].EntityTypeAssemblyQualifiedName == typeof(Blog).AssemblyQualifiedName &&
-                     s.EntityChanges[0].PropertyChanges.Count == 3 && // Blog.Id, Blog.Name, Blog.Url
+                     s.EntityChanges[0].EntityTypeFullName == typeof(Blog).FullName &&
+                     s.EntityChanges[0].PropertyChanges.Count == 2 && // Blog.Name, Blog.Url
 
                      // Check "who did this change"
                      s.ImpersonatorTenantId == AbpSession.ImpersonatorTenantId &&
@@ -112,14 +114,14 @@ namespace Abp.Zero.EntityHistory
 
             UsingDbContext(tenantId, (context) =>
             {
-                context.EntityPropertyChanges.Count(f => f.TenantId == tenantId).ShouldBe(3);
+                context.EntityPropertyChanges.Count(f => f.TenantId == tenantId).ShouldBe(2);
             });
         }
 
         [Fact]
         public void Should_Write_History_For_Tracked_Entities_Update()
         {
-            /* Blog has HistoryTracked attribute. */
+            /* Blog has Audited attribute. */
 
             var newValue = "http://testblog1-changed.myblogs.com";
             var originalValue = UpdateBlogUrlAndGetOriginalValue(newValue);
@@ -128,19 +130,19 @@ namespace Abp.Zero.EntityHistory
                 s => s.EntityChanges.Count == 1 &&
                      s.EntityChanges[0].ChangeType == EntityChangeType.Updated &&
                      s.EntityChanges[0].EntityId == s.EntityChanges[0].EntityEntry.As<EntityEntry>().Entity.As<IEntity>().Id.ToJsonString(false, false) &&
-                     s.EntityChanges[0].EntityTypeAssemblyQualifiedName == typeof(Blog).AssemblyQualifiedName &&
+                     s.EntityChanges[0].EntityTypeFullName == typeof(Blog).FullName &&
                      s.EntityChanges[0].PropertyChanges.Count == 1 &&
                      s.EntityChanges[0].PropertyChanges.FirstOrDefault().NewValue == newValue.ToJsonString(false, false) &&
                      s.EntityChanges[0].PropertyChanges.FirstOrDefault().OriginalValue == originalValue.ToJsonString(false, false) &&
                      s.EntityChanges[0].PropertyChanges.FirstOrDefault().PropertyName == nameof(Blog.Url) &&
-                     s.EntityChanges[0].PropertyChanges.FirstOrDefault().PropertyTypeName == typeof(Blog).GetProperty(nameof(Blog.Url)).PropertyType.AssemblyQualifiedName
+                     s.EntityChanges[0].PropertyChanges.FirstOrDefault().PropertyTypeFullName == typeof(Blog).GetProperty(nameof(Blog.Url)).PropertyType.FullName
             ));
         }
 
         [Fact]
         public void Should_Write_History_For_Tracked_Property_Foreign_Key()
         {
-            /* Post.BlogId has HistoryTracked attribute. */
+            /* Post.BlogId has Audited attribute. */
 
             var blogId = CreateBlogAndGetId();
             _entityHistoryStore.ClearReceivedCalls();
@@ -165,15 +167,39 @@ namespace Abp.Zero.EntityHistory
                 s => s.EntityChanges.Count == 1 &&
                      s.EntityChanges[0].ChangeType == EntityChangeType.Updated &&
                      s.EntityChanges[0].EntityId == post1Id.ToJsonString(false, false) &&
-                     s.EntityChanges[0].EntityTypeAssemblyQualifiedName == typeof(Post).AssemblyQualifiedName &&
+                     s.EntityChanges[0].EntityTypeFullName == typeof(Post).FullName &&
                      s.EntityChanges[0].PropertyChanges.Count == 1 // Post.BlogId
+            ));
+        }
+
+        [Fact]
+        public void Should_Write_History_For_Tracked_Property_Foreign_Key_Shadow()
+        {
+            /* Comment has Audited attribute. */
+
+            using (var uow = Resolve<IUnitOfWorkManager>().Begin())
+            {
+                var comment1 = _commentRepository.Single(b => b.Content == "test-comment-1-content");
+                var post2 = _postRepository.Single(b => b.Body == "test-post-2-body");
+
+                // Change foreign key by assigning navigation property
+                comment1.Post = post2;
+                _commentRepository.Update(comment1);
+
+                uow.Complete();
+            }
+
+            _entityHistoryStore.Received().SaveAsync(Arg.Is<EntityChangeSet>(
+                s => s.EntityChanges.Count == 1 &&
+                     s.EntityChanges[0].PropertyChanges.Count == 1 &&
+                     s.EntityChanges[0].PropertyChanges.First().PropertyName == "PostId"
             ));
         }
 
         [Fact]
         public void Should_Write_History_But_Not_For_Property_If_Disabled_History_Tracking()
         {
-            /* Blog.Name has DisableHistoryTracking attribute. */
+            /* Blog.Name has DisableAuditing attribute. */
 
             using (var uow = Resolve<IUnitOfWorkManager>().Begin())
             {
@@ -189,7 +215,7 @@ namespace Abp.Zero.EntityHistory
                 s => s.EntityChanges.Count == 1 &&
                      s.EntityChanges[0].ChangeType == EntityChangeType.Updated &&
                      s.EntityChanges[0].EntityId == s.EntityChanges[0].EntityEntry.As<EntityEntry>().Entity.As<IEntity>().Id.ToJsonString(false, false) &&
-                     s.EntityChanges[0].EntityTypeAssemblyQualifiedName == typeof(Blog).AssemblyQualifiedName &&
+                     s.EntityChanges[0].EntityTypeFullName == typeof(Blog).FullName &&
                      s.EntityChanges[0].PropertyChanges.Count == 0
             ));
         }
@@ -203,7 +229,7 @@ namespace Abp.Zero.EntityHistory
         {
             Resolve<IEntityHistoryConfiguration>().IsEnabled = false;
 
-            /* Blog has HistoryTracked attribute. */
+            /* Blog has Audited attribute. */
 
             var newValue = "http://testblog1-changed.myblogs.com";
             var originalValue = UpdateBlogUrlAndGetOriginalValue(newValue);
