@@ -137,6 +137,21 @@ namespace Abp.Authorization.Roles
         }
 
         /// <summary>
+        /// Checks if a role is granted for a permission.
+        /// </summary>
+        /// <param name="roleId">role id</param>
+        /// <param name="permission">The permission</param>
+        /// <returns>True, if the role has the permission</returns>
+        public virtual bool IsGranted(int roleId, Permission permission)
+        {
+            //Get cached role permissions
+            var cacheItem = GetRolePermissionCacheItem(roleId);
+
+            //Check the permission
+            return cacheItem.GrantedPermissions.Contains(permission.Name);
+        }
+
+        /// <summary>
         /// Gets granted permission names for a role.
         /// </summary>
         /// <param name="roleId">Role id</param>
@@ -163,17 +178,9 @@ namespace Abp.Authorization.Roles
         /// <returns>List of granted permissions</returns>
         public virtual async Task<IReadOnlyList<Permission>> GetGrantedPermissionsAsync(TRole role)
         {
-            var permissionList = new List<Permission>();
-
-            foreach (var permission in _permissionManager.GetAllPermissions())
-            {
-                if (await IsGrantedAsync(role.Id, permission))
-                {
-                    permissionList.Add(permission);
-                }
-            }
-
-            return permissionList;
+            var cacheItem = await GetRolePermissionCacheItemAsync(role.Id);
+            var allPermissions = _permissionManager.GetAllPermissions();
+            return allPermissions.Where(x => cacheItem.GrantedPermissions.Contains(x.Name)).ToList();
         }
 
         /// <summary>
@@ -256,7 +263,7 @@ namespace Abp.Authorization.Roles
         /// <summary>
         /// Resets all permission settings for a role.
         /// It removes all permission settings for the role.
-        /// Role will have permissions those have <see cref="Permission.IsGrantedByDefault"/> set to true.
+        /// Role will have permissions for which <see cref="StaticRoleDefinition.IsGrantedByDefault"/> returns true.
         /// </summary>
         /// <param name="role">Role</param>
         public async Task ResetAllPermissionsAsync(TRole role)
@@ -346,6 +353,26 @@ namespace Abp.Authorization.Roles
             return role;
         }
 
+        /// <summary>
+        /// Gets a role by given name.
+        /// Throws exception if no role with given roleName.
+        /// </summary>
+        /// <param name="roleName">Role name</param>
+        /// <returns>Role</returns>
+        /// <exception cref="AbpException">Throws exception if no role with given roleName</exception>
+        public virtual TRole GetRoleByName(string roleName)
+        {
+            var normalizedRoleName = roleName.ToUpperInvariant();
+
+            var role = AbpStore.FindByName(normalizedRoleName);
+            if (role == null)
+            {
+                throw new AbpException("There is no role with name: " + roleName);
+            }
+
+            return role;
+        }
+
         public async Task GrantAllPermissionsAsync(TRole role)
         {
             FeatureDependencyContext.TenantId = role.TenantId;
@@ -372,7 +399,7 @@ namespace Abp.Authorization.Roles
                     {
                         TenantId = tenantId,
                         Name = staticRoleDefinition.RoleName,
-                        DisplayName = staticRoleDefinition.RoleName,
+                        DisplayName = staticRoleDefinition.RoleDisplayName,
                         IsStatic = true
                     };
 
@@ -563,6 +590,49 @@ namespace Abp.Authorization.Roles
                 }
 
                 foreach (var permissionInfo in await RolePermissionStore.GetPermissionsAsync(roleId))
+                {
+                    if (permissionInfo.IsGranted)
+                    {
+                        newCacheItem.GrantedPermissions.AddIfNotContains(permissionInfo.Name);
+                    }
+                    else
+                    {
+                        newCacheItem.GrantedPermissions.Remove(permissionInfo.Name);
+                    }
+                }
+
+                return newCacheItem;
+            });
+        }
+
+        private RolePermissionCacheItem GetRolePermissionCacheItem(int roleId)
+        {
+            var cacheKey = roleId + "@" + (GetCurrentTenantId() ?? 0);
+            return _cacheManager.GetRolePermissionCache().Get(cacheKey, () =>
+            {
+                var newCacheItem = new RolePermissionCacheItem(roleId);
+
+                var role = AbpStore.FindById(roleId.ToString(), CancellationToken);
+                if (role == null)
+                {
+                    throw new AbpException("There is no role with given id: " + roleId);
+                }
+
+                var staticRoleDefinition = RoleManagementConfig.StaticRoles.FirstOrDefault(r =>
+                    r.RoleName == role.Name && r.Side == role.GetMultiTenancySide());
+
+                if (staticRoleDefinition != null)
+                {
+                    foreach (var permission in _permissionManager.GetAllPermissions())
+                    {
+                        if (staticRoleDefinition.IsGrantedByDefault(permission))
+                        {
+                            newCacheItem.GrantedPermissions.Add(permission.Name);
+                        }
+                    }
+                }
+
+                foreach (var permissionInfo in RolePermissionStore.GetPermissions(roleId))
                 {
                     if (permissionInfo.IsGranted)
                     {
